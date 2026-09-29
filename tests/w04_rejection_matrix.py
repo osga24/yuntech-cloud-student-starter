@@ -41,14 +41,14 @@ def request(base, method, path, token=None, body=None):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit(f"Usage: {sys.argv[0]} INSTANCE_ID")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit(f"Usage: {sys.argv[0]} INSTANCE_ID [BASE_URL]")
     ctx = lab.verify()
     item = lab.run_aws(["ec2", "describe-instances", "--instance-ids", sys.argv[1],
                         "--query", "Reservations[0].Instances[0].{State:State.Name,IP:PublicIpAddress}"], ctx["region"])
     if item.get("State") != "running" or not item.get("IP"):
         raise SystemExit("STOP: target must be running with a public IPv4 address")
-    base = "http://" + item["IP"]
+    base = sys.argv[2].rstrip("/") if len(sys.argv) == 3 else "http://" + item["IP"]
     token = secrets(ROOT / ".local/app.env")
     event = json.loads((ROOT / "tests/fixtures/valid_event.json").read_text())
     no_timezone = dict(event, event_id=event["event_id"] + "-tz", observed_at="2026-09-29T10:00:00")
