@@ -56,19 +56,11 @@ ssh "${ssh_opts[@]}" "ec2-user@$public_ip" \
   'sudo install -d -m 755 /etc/inspection && sudo install -o root -g root -m 600 /dev/stdin /etc/inspection/app.env && sudo systemctl restart inspection' \
   < "$secret"
 
-python3 - "$public_ip" "$commit" <<'PY'
-import json, sys, time, urllib.request
-url = "http://" + sys.argv[1] + "/health"
-for attempt in range(20):
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            body = json.load(response)
-        if response.status == 200 and body.get("version") == sys.argv[2] and body.get("auth_configured") is True:
-            print(json.dumps(body, separators=(",", ":")))
-            break
-    except OSError:
-        pass
-    time.sleep(2)
-else:
+health=$(ssh "${ssh_opts[@]}" "ec2-user@$public_ip" 'curl -fsS http://127.0.0.1/health')
+python3 - "$commit" "$health" <<'PY'
+import json, sys
+body = json.loads(sys.argv[2])
+if body.get("version") != sys.argv[1] or body.get("auth_configured") is not True:
     raise SystemExit("STOP: /health did not confirm the commit and auth_configured=true")
+print(json.dumps(body, separators=(",", ":")))
 PY
