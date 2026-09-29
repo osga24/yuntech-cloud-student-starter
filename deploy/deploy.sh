@@ -11,7 +11,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 secret=.local/app.env
-if [[ ! -f $secret || $(stat -c '%a' "$secret") != 600 ]]; then
+secret_mode=$(stat -f '%Lp' "$secret" 2>/dev/null || stat -c '%a' "$secret" 2>/dev/null || true)
+if [[ ! -f $secret || $secret_mode != 600 ]]; then
   echo "STOP: .local/app.env must exist and have mode 600." >&2
   exit 1
 fi
