@@ -11,12 +11,23 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 secret=.local/app.env
+temp_secret=""
 secret_mode=$(stat -f '%Lp' "$secret" 2>/dev/null || stat -c '%a' "$secret" 2>/dev/null || true)
 if [[ ! -f $secret || $secret_mode != 600 ]]; then
   echo "STOP: .local/app.env must exist and have mode 600." >&2
   exit 1
 fi
 [[ -f $key_file ]] || { echo "STOP: SSH private key not found." >&2; exit 1; }
+db_secret=.local/db.env
+if [[ -f $db_secret ]]; then
+  db_mode=$(stat -f '%Lp' "$db_secret" 2>/dev/null || stat -c '%a' "$db_secret" 2>/dev/null || true)
+  [[ $db_mode == 600 ]] || { echo "STOP: .local/db.env must have mode 600." >&2; exit 1; }
+  temp_secret=$(mktemp .local/deploy-secret.XXXXXX)
+  chmod 600 "$temp_secret"
+  cat .local/app.env .local/db.env > "$temp_secret"
+  secret=$temp_secret
+fi
+trap '[[ -z "$temp_secret" ]] || rm -f "$temp_secret"' EXIT
 
 commit=$(git rev-parse --verify HEAD^{commit})
 if [[ -n $(git status --porcelain -- app/service.py deploy/nginx.conf) ]]; then
@@ -49,7 +60,7 @@ read -r -p "Type DEPLOY to continue: " answer
 mkdir -p .local
 install_dir=$(mktemp -d .local/w04-install.XXXXXX)
 install_script=$install_dir/install.sh
-trap 'rm -rf "$install_dir"' EXIT
+trap 'rm -rf "$install_dir"; [[ -z "$temp_secret" ]] || rm -f "$temp_secret"' EXIT
 python3 deploy/make_user_data.py "$commit" "$install_script"
 ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8)
 ssh "${ssh_opts[@]}" "ec2-user@$public_ip" 'sudo bash -s' < "$install_script"
@@ -58,10 +69,14 @@ ssh "${ssh_opts[@]}" "ec2-user@$public_ip" \
   < "$secret"
 
 health=$(ssh "${ssh_opts[@]}" "ec2-user@$public_ip" 'curl -fsS http://127.0.0.1/health')
-python3 - "$commit" "$health" <<'PY'
+db_expected=false
+[[ -f .local/db.env ]] && db_expected=true
+python3 - "$commit" "$health" "$db_expected" <<'PY'
 import json, sys
 body = json.loads(sys.argv[2])
-if body.get("version") != sys.argv[1] or body.get("auth_configured") is not True:
-    raise SystemExit("STOP: /health did not confirm the commit and auth_configured=true")
+expected_db = sys.argv[3] == "true"
+if (body.get("version") != sys.argv[1] or body.get("auth_configured") is not True
+        or body.get("db_configured") is not expected_db):
+    raise SystemExit("STOP: /health did not confirm the commit, auth, and expected DB configuration")
 print(json.dumps(body, separators=(",", ":")))
 PY

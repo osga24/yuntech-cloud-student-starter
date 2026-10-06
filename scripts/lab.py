@@ -165,11 +165,13 @@ def approve(description, token):
 def inventory():
     ctx = verify()
     queries = [
-        ("EC2", ["ec2", "describe-instances", "--query", "Reservations[].Instances[].{Id:InstanceId,State:State.Name,Type:InstanceType}"]),
+        ("EC2", ["ec2", "describe-instances", "--query", "Reservations[].Instances[].{Id:InstanceId,State:State.Name,Type:InstanceType,Subnet:SubnetId,AZ:Placement.AvailabilityZone,SG:SecurityGroups[].GroupId}"]),
         ("S3", ["s3api", "list-buckets", "--query", "Buckets[].Name"]),
         ("RDS", ["rds", "describe-db-instances", "--query", "DBInstances[].{Id:DBInstanceIdentifier,Status:DBInstanceStatus,Public:PubliclyAccessible}"]),
         ("VPC", ["ec2", "describe-vpcs", "--query", "Vpcs[].{Id:VpcId,CIDR:CidrBlock}"]),
-        ("SecurityGroups", ["ec2", "describe-security-groups", "--query", "SecurityGroups[].{Id:GroupId,VPC:VpcId,Name:GroupName}"])]
+        ("SecurityGroups", ["ec2", "describe-security-groups", "--query", "SecurityGroups[].{Id:GroupId,VPC:VpcId,Name:GroupName}"]),
+        ("Subnets", ["ec2", "describe-subnets", "--query", "Subnets[].{Id:SubnetId,VPC:VpcId,CIDR:CidrBlock,AZ:AvailabilityZone,State:State}"]),
+        ("RouteTables", ["ec2", "describe-route-tables", "--query", "RouteTables[].{Id:RouteTableId,VPC:VpcId,Associations:Associations[].{Subnet:SubnetId,Main:Main},Routes:Routes[].{Destination:DestinationCidrBlock,Gateway:GatewayId,Target:NatGatewayId}}"])]
     failed = False
     for label, args in queries:
         print(f"$ aws --profile learnerlab --region {ctx['region']} {' '.join(args[:2])} [bounded projection]")

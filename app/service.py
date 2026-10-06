@@ -20,7 +20,26 @@ def make_server(version_file, port=8080):
     started = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     reporter, operator = os.environ.get("REPORTER_TOKEN", ""), os.environ.get("OPERATOR_TOKEN", "")
     configured = bool(reporter and operator and reporter != operator)
-    events, by_id, lock = [], {}, threading.Lock()
+    db_config = {key: os.environ.get(key, "") for key in ("DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD")}
+    db_configured = all(db_config.values())
+
+    def connect_db():
+        # Import lazily so the service remains usable while database secrets are absent.
+        import psycopg2
+        return psycopg2.connect(
+            host=db_config["DB_HOST"], dbname=db_config["DB_NAME"], user=db_config["DB_USER"],
+            password=db_config["DB_PASSWORD"], sslmode="verify-full",
+            sslrootcert="/etc/inspection/rds-ca.pem", connect_timeout=5,
+        )
+
+    def initialize_db():
+        if not db_configured:
+            return
+        with connect_db() as conn, conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, observed_at TIMESTAMPTZ NOT NULL,
+                type TEXT NOT NULL, note TEXT, received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )""")
 
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
@@ -88,27 +107,51 @@ def make_server(version_file, port=8080):
             if not self.authorize(reporter): return  # 401/403 must precede validation.
             event = self.read_event()
             if event is None: return
-            with lock:
-                if event["event_id"] in by_id:
-                    self.error(409, "duplicate_event_id", "event_id"); return
-                stored = dict(event)
-                stored["received_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-                events.append(stored); by_id[stored["event_id"]] = stored
-            self.reply(201, stored)
+            try:
+                with connect_db() as conn, conn.cursor() as cur:
+                    cur.execute("""INSERT INTO events(event_id,device_id,observed_at,type,note)
+                        VALUES (%s,%s,%s,%s,%s) ON CONFLICT (event_id) DO NOTHING
+                        RETURNING event_id,device_id,observed_at,type,note,received_at""",
+                        (event["event_id"], event["device_id"], event["observed_at"], event["type"], event.get("note")))
+                    row = cur.fetchone()
+                    inserted = row is not None
+                    if row is None:
+                        cur.execute("SELECT device_id,observed_at,type,note FROM events WHERE event_id=%s",
+                                    (event["event_id"],))
+                        existing = cur.fetchone()
+                        same = existing is not None and existing[0] == event["device_id"] and existing[1] == datetime.fromisoformat(event["observed_at"].replace("Z", "+00:00")) and existing[2] == event["type"] and existing[3] == event.get("note")
+                        if same:
+                            cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events WHERE event_id=%s", (event["event_id"],))
+                            row = cur.fetchone()
+                        else:
+                            self.error(409, "event_id_conflict", "event_id"); return
+                    stored = {"event_id": row[0], "device_id": row[1], "observed_at": row[2].isoformat(),
+                              "type": row[3], "note": row[4], "received_at": row[5].isoformat()}
+                self.reply(201 if inserted else 200, stored)
+            except Exception:
+                self.error(503, "database_unavailable", "database")
 
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/health":
                 self.reply(200, {"status":"ok", "service":"inspection", "version":version,
-                                 "started_at":started, "auth_configured":configured}); return
+                                 "started_at":started, "auth_configured":configured,
+                                 "db_configured":db_configured}); return
             if path == "/": self.page(); return
             if path == "/events" or path.startswith("/events/"):
                 if not self.authorize(operator): return
-                with lock:
-                    if path == "/events": self.reply(200, list(reversed(events[-50:]))); return
-                    item = by_id.get(unquote(path[len("/events/"):]))
-                    if item is None: self.error(404, "not_found", "event_id")
-                    else: self.reply(200, item)
+                try:
+                    with connect_db() as conn, conn.cursor() as cur:
+                        if path == "/events":
+                            cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events ORDER BY received_at DESC LIMIT 50")
+                            rows = cur.fetchall()
+                            self.reply(200, [dict(zip(("event_id","device_id","observed_at","type","note","received_at"), (v.isoformat() if isinstance(v, datetime) else v for v in row))) for row in rows]); return
+                        cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events WHERE event_id=%s", (unquote(path[len("/events/"):]),))
+                        row = cur.fetchone()
+                        if row is None: self.error(404, "not_found", "event_id")
+                        else: self.reply(200, dict(zip(("event_id","device_id","observed_at","type","note","received_at"), (v.isoformat() if isinstance(v, datetime) else v for v in row))))
+                except Exception:
+                    self.error(503, "database_unavailable", "database")
                 return
             self.error(404, "not_found", "path")
 
@@ -122,6 +165,8 @@ def make_server(version_file, port=8080):
         def log_message(self, fmt, *args):
             pass  # Never log paths, bodies, headers, query strings, or tokens.
 
+    if db_configured:
+        initialize_db()
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
