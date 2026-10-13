@@ -13,7 +13,7 @@ bash scripts/verify-aws.sh
 
 ## 本機執行順序
 
-1. `bash deploy/w6-start.sh`：只恢復 `.local/resources.json` 記錄的 W5 EC2/RDS。若 TCP 22/80 需要改來源，目標是執行當下 Mac 的公網 IPv4 `/32`；腳本會先讀取現行規則並要求確認。若自動出口查詢和直連 SSH 的來源不同，可用 `bash deploy/w6-start.sh --source-cidr <實測出口>/32` 指定直連來源。SSH、HTTP 只會從指定的 `/32` 允許。
+1. `bash deploy/w6-start.sh`：只恢復 `.local/resources.json` 記錄的 W5 EC2/RDS。若 TCP 22/80 需要改來源，目標是 Mac 公網出口的精確 `/32`；腳本會先讀取現行規則並要求確認。若出口在多個已觀測的 `/32` 間切換，可重複指定，例如 `bash deploy/w6-start.sh --source-cidr 59.125.76.248/32 --source-cidr 59.125.76.249/32`。SSH、HTTP 只會從列出的 `/32` 允許。
 2. `bash deploy/iot-up.sh`：建立本週兩個 IoT 身分與精確主題政策。憑證私鑰只存 `.local/iot/`；不要複製或貼出。
 3. 本機終端 A 先執行 `python3 tools/mqtt_check.py --code g08-m2 --as consumer --sub cxe/g08-m2/gw/events --wait 60`。終端 B 再執行 `python3 tools/mqtt_check.py --code g08-m2 --as gw --pub cxe/g08-m2/gw/events`。
 4. 確認 W6 程式已 commit 後執行 `./deploy/deploy.sh`。它會部署到記錄的 W5 EC2，並重啟 API 與 consumer。

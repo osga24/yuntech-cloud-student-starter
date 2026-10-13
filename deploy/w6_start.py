@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resume recorded W5 EC2/RDS and align SSH/HTTP ingress to this Mac's /32."""
+"""Resume recorded W5 EC2/RDS and align SSH/HTTP ingress to measured Mac /32s."""
 import argparse
 import ipaddress
 import json
@@ -43,52 +43,60 @@ def inbound_sources(ctx, sg_id):
         if len(matching) != 1 or matching[0].get("UserIdGroupPairs") or matching[0].get("Ipv6Ranges") or matching[0].get("PrefixListIds"):
             raise lab.LabError(f"Security group TCP/{port} rule is not the expected single IPv4 CIDR; inspect manually.")
         result[port] = {item["CidrIp"] for item in matching[0].get("IpRanges", [])}
-        if len(result[port]) != 1:
-            raise lab.LabError(f"Security group TCP/{port} must have exactly one IPv4 source; refusing changes.")
+        if not result[port]:
+            raise lab.LabError(f"Security group TCP/{port} has no IPv4 source; refusing changes.")
     return result
 
 
-def set_mac_source(ctx, data, target):
+def set_mac_sources(ctx, data, targets):
     sg_id = data.get("security_group_id", "")
     if not sg_id:
         raise lab.LabError("Recorded host security group missing from resources file.")
     sources = inbound_sources(ctx, sg_id)
-    if all(values == {target} for values in sources.values()):
-        data["source_cidr"] = target
+    target_set = set(targets)
+    old_values = data.get("source_cidrs") or ([data.get("source_cidr")] if data.get("source_cidr") else [])
+    old_set = set(old_values)
+    if all(values == target_set for values in sources.values()):
+        data["source_cidrs"] = sorted(target_set)
+        data["source_cidr"] = sorted(target_set)[0]
         save(data)
         return
-    old = data.get("source_cidr", "")
-    if not old or any(values not in ({old}, {target}) for values in sources.values()):
+    if not old_set or any(values not in (old_set, target_set) for values in sources.values()):
         raise lab.LabError("Recorded source CIDR does not match actual TCP/22 and TCP/80 rules; refusing to guess ownership.")
+    old = ", ".join(sorted(old_set))
+    new = ", ".join(sorted(target_set))
     plan = (
-        f"Change only SG {sg_id}: TCP 22 and 80 source {old} -> {target}. "
-        "The new source is this Mac's current public IPv4 /32; no broad ingress, no other ports, no new AWS resource. "
+        f"Change only SG {sg_id}: TCP 22 and 80 sources [{old}] -> [{new}]. "
+        "Every source is an individually observed Mac public IPv4 /32; no broad ingress, no other ports, no new AWS resource. "
         "No hourly resource cost change; EC2/RDS runtime charges continue while started. "
-        f"Recovery: restore TCP 22 and 80 to {old} in the same recorded SG."
+        f"Recovery: restore TCP 22 and 80 to the prior source set [{old}] in the same recorded SG."
     )
     lab.approve(plan, "UPDATE_SG")
     for port in (22, 80):
-        if sources[port] != {target}:
+        missing = target_set - sources[port]
+        if missing:
             permission = [{"IpProtocol": "tcp", "FromPort": port, "ToPort": port,
-                           "IpRanges": [{"CidrIp": target, "Description": "W6 Mac /32"}]}]
+                           "IpRanges": [{"CidrIp": cidr, "Description": "W6 Mac /32"} for cidr in sorted(missing)]}]
             lab.run_aws(["ec2", "authorize-security-group-ingress", "--group-id", sg_id,
                          "--ip-permissions", json.dumps(permission)], ctx["region"])
     for port in (22, 80):
-        if sources[port] == {old}:
+        stale = sources[port] - target_set
+        if stale:
             permission = [{"IpProtocol": "tcp", "FromPort": port, "ToPort": port,
-                           "IpRanges": [{"CidrIp": old}]}]
+                           "IpRanges": [{"CidrIp": cidr} for cidr in sorted(stale)]}]
             lab.run_aws(["ec2", "revoke-security-group-ingress", "--group-id", sg_id,
                          "--ip-permissions", json.dumps(permission)], ctx["region"])
-    data["source_cidr"] = target
+    data["source_cidrs"] = sorted(target_set)
+    data["source_cidr"] = sorted(target_set)[0]
     save(data)
     verified = inbound_sources(ctx, sg_id)
-    if any(values != {target} for values in verified.values()):
-        raise lab.LabError("Final security-group read-back differs from the requested /32; stop and inspect.")
+    if any(values != target_set for values in verified.values()):
+        raise lab.LabError("Final security-group read-back differs from the requested /32 set; stop and inspect.")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-cidr", help="explicit Mac SSH/HTTP egress IPv4 /32")
+    parser.add_argument("--source-cidr", action="append", help="explicit Mac SSH/HTTP egress IPv4 /32; repeat for each observed egress")
     args = parser.parse_args()
     if not STATE.is_file():
         raise lab.LabError("Missing .local/resources.json; W6 must resume the recorded W5 resources.")
@@ -101,15 +109,18 @@ def main():
     if not instance_id or not db_id:
         raise lab.LabError("Recorded W5 EC2 or RDS identifier missing; refusing to create replacement resources.")
     if args.source_cidr:
-        try:
-            network = ipaddress.ip_network(args.source_cidr, strict=True)
-        except ValueError as exc:
-            raise lab.LabError("--source-cidr must be a valid IPv4 /32.") from exc
-        if network.version != 4 or network.prefixlen != 32:
-            raise lab.LabError("--source-cidr must be a valid IPv4 /32.")
-        target = str(network)
+        targets = []
+        for raw in args.source_cidr:
+            try:
+                network = ipaddress.ip_network(raw, strict=True)
+            except ValueError as exc:
+                raise lab.LabError("--source-cidr values must be valid IPv4 /32s.") from exc
+            if network.version != 4 or network.prefixlen != 32:
+                raise lab.LabError("--source-cidr values must be valid IPv4 /32s.")
+            targets.append(str(network))
+        targets = sorted(set(targets))
     else:
-        target = mac_cidr()
+        targets = [mac_cidr()]
 
     instance = lab.run_aws(["ec2", "describe-instances", "--instance-ids", instance_id,
                             "--query", "Reservations[0].Instances[0].{Id:InstanceId,State:State.Name}"], ctx["region"])
@@ -150,7 +161,7 @@ def main():
     data["public_ip"] = current_ip
     save(data)
 
-    set_mac_source(ctx, data, target)
+    set_mac_sources(ctx, data, targets)
     deadline = time.monotonic() + 900
     while True:
         db_state = lab.run_aws(["rds", "describe-db-instances", "--db-instance-identifier", db_id,
@@ -176,7 +187,7 @@ def main():
     if not health or health.get("status") != "ok" or health.get("db_configured") is not True:
         raise lab.LabError("Host /health did not confirm the W5 API and DB after resume; inspect without creating replacements.")
     print(json.dumps({"EC2": "running", "RDS": "available", "PubliclyAccessible": False,
-                      "host": current_ip, "health_version": health.get("version"), "MacSource": target}, indent=2))
+                      "host": current_ip, "health_version": health.get("version"), "MacSources": targets}, indent=2))
 
 
 if __name__ == "__main__":
