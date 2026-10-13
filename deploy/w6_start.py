@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Resume recorded W5 EC2/RDS and align SSH/HTTP ingress to this Mac's /32."""
+import argparse
 import ipaddress
 import json
 from pathlib import Path
@@ -86,6 +87,9 @@ def set_mac_source(ctx, data, target):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-cidr", help="explicit Mac SSH/HTTP egress IPv4 /32")
+    args = parser.parse_args()
     if not STATE.is_file():
         raise lab.LabError("Missing .local/resources.json; W6 must resume the recorded W5 resources.")
     ctx = lab.verify()
@@ -96,7 +100,16 @@ def main():
     db_id = data.get("w05_db_instance_identifier", "")
     if not instance_id or not db_id:
         raise lab.LabError("Recorded W5 EC2 or RDS identifier missing; refusing to create replacement resources.")
-    target = mac_cidr()
+    if args.source_cidr:
+        try:
+            network = ipaddress.ip_network(args.source_cidr, strict=True)
+        except ValueError as exc:
+            raise lab.LabError("--source-cidr must be a valid IPv4 /32.") from exc
+        if network.version != 4 or network.prefixlen != 32:
+            raise lab.LabError("--source-cidr must be a valid IPv4 /32.")
+        target = str(network)
+    else:
+        target = mac_cidr()
 
     instance = lab.run_aws(["ec2", "describe-instances", "--instance-ids", instance_id,
                             "--query", "Reservations[0].Instances[0].{Id:InstanceId,State:State.Name}"], ctx["region"])

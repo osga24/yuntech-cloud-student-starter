@@ -2,4 +2,4 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-exec python3 deploy/w6_start.py
+exec python3 deploy/w6_start.py "$@"
