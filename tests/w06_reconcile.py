@@ -9,10 +9,11 @@ import subprocess
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
+DIRECT_HTTP = build_opener(ProxyHandler({}))
 
 
 def read_env(path):
@@ -89,7 +90,7 @@ def main():
         raise SystemExit("STOP: host address or SSH key path is unavailable in local W3 resources")
 
     try:
-        with urlopen(f"http://{host}/health", timeout=10) as response:
+        with DIRECT_HTTP.open(f"http://{host}/health", timeout=10) as response:
             health = json.load(response)
     except (URLError, TimeoutError, HTTPError) as exc:
         raise SystemExit(f"STOP: cannot read /health ({type(exc).__name__})") from None
@@ -128,7 +129,7 @@ def main():
     url = f"http://{host}/events?{urlencode({'device_id': args.code + '-d01'})}"
     request = Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urlopen(request, timeout=10) as response:
+        with DIRECT_HTTP.open(request, timeout=10) as response:
             events = json.load(response)
     except (URLError, TimeoutError, HTTPError) as exc:
         raise SystemExit(f"STOP: filtered API request failed ({type(exc).__name__})") from None
