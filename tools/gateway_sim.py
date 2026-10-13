@@ -14,6 +14,10 @@ from iot_common import load_identity, mqtt5_client, ROOT
 CODE_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
 
 
+def reason_value(reason):
+    return reason.value if hasattr(reason, "value") else int(reason)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--code", required=True)
@@ -29,11 +33,11 @@ def main():
     state = {"connack": 255, "mid": None, "ack_code": 255, "count": 0, "acks": {}}
 
     def on_connect(client, userdata, flags, reason_code, properties):
-        state["connack"] = getattr(reason_code, "value", int(reason_code))
+        state["connack"] = reason_value(reason_code)
         connected.set()
 
     def on_publish(client, userdata, mid, reason_code, properties):
-        state["acks"][mid] = getattr(reason_code, "value", int(reason_code))
+        state["acks"][mid] = reason_value(reason_code)
         if mid == state["mid"]:
             state["ack_code"] = state["acks"][mid]
             ack_event.set()
