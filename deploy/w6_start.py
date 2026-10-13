@@ -21,7 +21,8 @@ def save(data):
 
 
 def mac_cidr():
-    result = subprocess.run(["curl", "--max-time", "8", "-fsS", "https://checkip.amazonaws.com"],
+    result = subprocess.run(["curl", "--noproxy", "*", "--max-time", "8", "-fsS",
+                             "https://checkip.amazonaws.com"],
                             capture_output=True, text=True, timeout=10, check=False)
     if result.returncode:
         raise lab.LabError("Could not determine the Mac's current public egress IP; refusing security-group changes.")
