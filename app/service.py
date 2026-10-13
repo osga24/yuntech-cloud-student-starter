@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac, json, os, re, threading
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 DEVICE_RE = re.compile(r"[A-Za-z0-9_-]{1,32}\Z")
@@ -132,7 +132,8 @@ def make_server(version_file, port=8080):
                 self.error(503, "database_unavailable", "database")
 
         def do_GET(self):
-            path = urlsplit(self.path).path
+            parsed = urlsplit(self.path)
+            path = parsed.path
             if path == "/health":
                 self.reply(200, {"status":"ok", "service":"inspection", "version":version,
                                  "started_at":started, "auth_configured":configured,
@@ -143,7 +144,13 @@ def make_server(version_file, port=8080):
                 try:
                     with connect_db() as conn, conn.cursor() as cur:
                         if path == "/events":
-                            cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events ORDER BY received_at DESC LIMIT 50")
+                            device_ids = parse_qs(parsed.query, keep_blank_values=True).get("device_id", [])
+                            if len(device_ids) > 1 or (device_ids and not DEVICE_RE.fullmatch(device_ids[0])):
+                                self.error(400, "invalid_format", "device_id"); return
+                            if device_ids:
+                                cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events WHERE device_id=%s ORDER BY received_at DESC LIMIT 50", (device_ids[0],))
+                            else:
+                                cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events ORDER BY received_at DESC LIMIT 50")
                             rows = cur.fetchall()
                             self.reply(200, [dict(zip(("event_id","device_id","observed_at","type","note","received_at"), (v.isoformat() if isinstance(v, datetime) else v for v in row))) for row in rows]); return
                         cur.execute("SELECT event_id,device_id,observed_at,type,note,received_at FROM events WHERE event_id=%s", (unquote(path[len("/events/"):]),))
@@ -170,8 +177,8 @@ def make_server(version_file, port=8080):
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
-PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>巡檢事件</title><style>body{font:16px system-ui;max-width:60rem;margin:2rem auto;padding:0 1rem}form{display:flex;gap:.5rem}input{flex:1;padding:.6rem}li{white-space:pre-wrap;background:#f4f6f7;margin:.6rem 0;padding:.8rem}</style></head><body><h1>巡檢事件</h1><form id="form"><label for="token">Operator 權杖</label><input id="token" type="password" autocomplete="off" required><button>讀取最新 50 筆</button></form><p id="message" role="status"></p><ol id="events"></ol><script>
-const form=document.getElementById('form'),token=document.getElementById('token'),message=document.getElementById('message'),list=document.getElementById('events');form.addEventListener('submit',async(event)=>{event.preventDefault();const credential=token.value;token.value='';message.textContent='讀取中…';list.replaceChildren();try{const response=await fetch('/events',{headers:{Authorization:'Bearer '+credential}}),body=await response.json();if(!response.ok)throw new Error(body.error||('HTTP '+response.status));for(const item of body){const row=document.createElement('li');row.textContent=JSON.stringify(item,null,2);list.appendChild(row)}message.textContent=`共 ${body.length} 筆`}catch(error){message.textContent='讀取失敗：'+error.message}});
+PAGE = """<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>巡檢事件</title><style>body{font:16px system-ui;max-width:60rem;margin:2rem auto;padding:0 1rem}form{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}input{padding:.6rem}li{white-space:pre-wrap;background:#f4f6f7;margin:.6rem 0;padding:.8rem}</style></head><body><h1>巡檢事件</h1><form id="form"><label for="token">Operator 權杖</label><input id="token" type="password" autocomplete="off" required><label for="device">設備編號</label><input id="device" autocomplete="off" placeholder="選填"><button>讀取事件</button></form><p id="message" role="status"></p><ol id="events"></ol><script>
+const form=document.getElementById('form'),token=document.getElementById('token'),device=document.getElementById('device'),message=document.getElementById('message'),list=document.getElementById('events');form.addEventListener('submit',async(event)=>{event.preventDefault();const credential=token.value;token.value='';message.textContent='讀取中…';list.replaceChildren();try{const query=device.value.trim()?('?device_id='+encodeURIComponent(device.value.trim())):'';const response=await fetch('/events'+query,{headers:{Authorization:'Bearer '+credential}}),body=await response.json();if(!response.ok)throw new Error(body.error||('HTTP '+response.status));for(const item of body){const row=document.createElement('li');row.textContent=JSON.stringify(item,null,2);list.appendChild(row)}message.textContent=`共 ${body.length} 筆`}catch(error){message.textContent='讀取失敗：'+error.message}});
 </script></body></html>"""
 
 if __name__ == "__main__":
