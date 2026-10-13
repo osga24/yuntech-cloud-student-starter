@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Reconcile one W6 MQTT run against consumer logs, RDS, and the filtered API."""
 import argparse
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import re
 import shlex
+import socket
 import subprocess
 import time
 from urllib.error import HTTPError, URLError
@@ -36,6 +38,39 @@ def ssh_capture(key, host, command):
          "-o", "ConnectTimeout=10", f"ec2-user@{host}", command],
         text=True, capture_output=True, timeout=25, check=False,
     )
+
+
+@contextmanager
+def ssh_api_tunnel(key, host):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    process = subprocess.Popen(
+        ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+         "-o", "ConnectTimeout=10", "-o", "ExitOnForwardFailure=yes", "-N", "-L",
+         f"127.0.0.1:{port}:127.0.0.1:80", f"ec2-user@{host}"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise SystemExit("STOP: SSH API tunnel could not start")
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    break
+            except OSError:
+                time.sleep(0.25)
+        else:
+            raise SystemExit("STOP: SSH API tunnel did not become ready")
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
 
 
 def remote_snapshot(key, host, prefix):
@@ -89,11 +124,13 @@ def main():
     if not host or not key_path.is_file():
         raise SystemExit("STOP: host address or SSH key path is unavailable in local W3 resources")
 
+    health_result = ssh_capture(str(key_path), host, "curl -fsS http://127.0.0.1/health")
+    if health_result.returncode != 0:
+        raise SystemExit("STOP: cannot read /health through SSH")
     try:
-        with DIRECT_HTTP.open(f"http://{host}/health", timeout=10) as response:
-            health = json.load(response)
-    except (URLError, TimeoutError, HTTPError) as exc:
-        raise SystemExit(f"STOP: cannot read /health ({type(exc).__name__})") from None
+        health = json.loads(health_result.stdout)
+    except ValueError:
+        raise SystemExit("STOP: invalid /health response through SSH") from None
     print(f"version={health.get('version')} db_configured={str(health.get('db_configured')).lower()} prefix={prefix}")
     print(f"puback_ok={last_run.get('puback_ok')}/32")
 
@@ -126,13 +163,14 @@ def main():
     print(evidence.stdout.rstrip())
     print("consumer_evidence_end")
 
-    url = f"http://{host}/events?{urlencode({'device_id': args.code + '-d01'})}"
-    request = Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with DIRECT_HTTP.open(request, timeout=10) as response:
-            events = json.load(response)
-    except (URLError, TimeoutError, HTTPError) as exc:
-        raise SystemExit(f"STOP: filtered API request failed ({type(exc).__name__})") from None
+    with ssh_api_tunnel(str(key_path), host) as api_base:
+        url = f"{api_base}/events?{urlencode({'device_id': args.code + '-d01'})}"
+        request = Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with DIRECT_HTTP.open(request, timeout=10) as response:
+                events = json.load(response)
+        except (URLError, TimeoutError, HTTPError) as exc:
+            raise SystemExit(f"STOP: filtered API request failed ({type(exc).__name__})") from None
     matched = [event.get("event_id") for event in events
                if isinstance(event, dict) and str(event.get("event_id", "")).startswith(prefix + "-")]
     print("device_d01_event_ids=" + json.dumps(matched, separators=(",", ":")))
