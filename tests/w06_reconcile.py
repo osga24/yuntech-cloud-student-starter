@@ -32,11 +32,11 @@ def read_env(path):
     return values
 
 
-def ssh_capture(key, host, command):
+def ssh_capture(key, host, command, input_data=None):
     return subprocess.run(
         ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
          "-o", "ConnectTimeout=10", f"ec2-user@{host}", command],
-        text=True, capture_output=True, timeout=25, check=False,
+        input=input_data, text=True, capture_output=True, timeout=25, check=False,
     )
 
 
@@ -82,11 +82,11 @@ def remote_snapshot(key, host, prefix):
             "set -a; . /etc/inspection/app.env; set +a; "
             'PGCONNECT_TIMEOUT=5 PGPASSWORD="$DB_PASSWORD" psql "host=$DB_HOST dbname=$DB_NAME user=$DB_USER '
             'sslmode=verify-full sslrootcert=/etc/inspection/rds-ca.pem" '
-            f"-v prefix={quoted_prefix} -At -v ON_ERROR_STOP=1 "
-            "-c \"SELECT count(*) FROM events WHERE left(event_id, length(:'prefix')) = :'prefix';\""
+            f"-v prefix={quoted_prefix} -At -v ON_ERROR_STOP=1"
         )
     )
-    return ssh_capture(key, host, command)
+    query = "SELECT count(*) FROM events WHERE left(event_id, length(:'prefix')) = :'prefix';\n"
+    return ssh_capture(key, host, command, query)
 
 
 def sample_logs(key, host, prefix):
