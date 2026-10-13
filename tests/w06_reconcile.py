@@ -142,7 +142,7 @@ def main():
             counters = {name: 0 for name in ("created", "duplicate", "rejected", "error")}
             db_count = None
             for line in snapshot.stdout.splitlines():
-                match = re.fullmatch(r"\s*(\d+)\s+(created|duplicate|rejected|error)", line)
+                match = re.fullmatch(r"\s*(\d+)\s+result=(created|duplicate|rejected|error)", line)
                 if match:
                     counters[match.group(2)] += int(match.group(1))
                 elif line.strip().isdigit():
