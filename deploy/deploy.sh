@@ -3,7 +3,22 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-if [[ $# -eq 0 ]]; then
+use_recorded_ip=false
+if [[ $# -eq 1 && $1 == --use-recorded-ip ]]; then
+  use_recorded_ip=true
+  IFS=$'\t' read -r instance_id key_file public_ip < <(python3 - <<'PY'
+import ipaddress, json
+from pathlib import Path
+data = json.loads(Path(".local/resources.json").read_text())
+key = Path(data.get("private_key", ""))
+if not key.is_file():
+    key = Path(".local") / key.name
+ip = data.get("public_ip", "")
+ipaddress.IPv4Address(ip)
+print(data.get("instance_id", "") + "\t" + str(key) + "\t" + ip)
+PY
+  )
+elif [[ $# -eq 0 ]]; then
   IFS=$'\t' read -r instance_id key_file < <(python3 - <<'PY'
 import json
 from pathlib import Path
@@ -87,6 +102,9 @@ if [[ -n $(git status --porcelain -- app/service.py app/consumer.py deploy/deplo
   exit 1
 fi
 
+if [[ $use_recorded_ip == true ]]; then
+  [[ -n ${public_ip:-} ]] || { echo "STOP: recorded public IP missing from .local/resources.json." >&2; exit 1; }
+else
 public_ip=$(python3 - "$instance_id" <<'PY'
 import sys
 from scripts import lab
@@ -99,6 +117,7 @@ print(item["IP"])
 PY
 )
 public_ip=$(printf '%s\n' "$public_ip" | tail -n 1)
+fi
 
 echo "Target instance: $instance_id ($public_ip)"
 echo "Committed version: $commit"
